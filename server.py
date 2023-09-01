@@ -10,94 +10,172 @@ import openai
 from dotenv import load_dotenv
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
+from langchain.llms import AzureOpenAI
+from langchain.callbacks.base import AsyncCallbackHandler, BaseCallbackHandler
+from typing import Any, Dict, List
+from langchain.schema import LLMResult, HumanMessage
+from typing import Callable, Union
+
+
+class MyCustomSyncHandler(BaseCallbackHandler):
+    def __init__(self, call_back: Callable[[str], Any]) -> None:
+        super().__init__()
+        self.cb = call_back
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        self.cb(token)
+
+
+class MyCustomAsyncHandler(AsyncCallbackHandler):
+    """Async callback handler that can be used to handle callbacks from langchain."""
+
+    def __init__(self, call_back: Callable[[str], Any]) -> None:
+        super().__init__()
+        self.cb = call_back
+
+    async def on_llm_new_token(self, token: str, **kwargs) -> None:
+        # print(token)
+        # await asyncio.sleep(1)
+        await self.cb(token)
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        await self.cb(response)
+
+    async def on_llm_error(
+        self, error: Union[Exception, KeyboardInterrupt], **kwargs
+    ) -> None:
+        await self.cb(error)
 
 
 class LLMModel:
-    def __init__(self) -> None:
-        # 初始化gpt模型
-        # %%
+    def __init__(self, websocket) -> None:
+        self.websocket = websocket
+        self.index = 0
+        self.p = None
+
+        async def token_cb(token):
+            try:
+                if isinstance(token, str):  # 发了个字符串on_llm_new_token
+                    if self.p == None:
+                        self.p = self.json_client["data"]["questionId"]
+                    else:
+                        if self.p != self.json_client["data"]["questionId"]:
+                            self.index = 0
+                    json_return = {
+                        "chatId": self.json_client["data"]["chatId"],
+                        "questionId": self.json_client["data"]["questionId"],
+                        "created": time.time(),
+                        "code": 0,
+                        "msg": "",
+                        "index": self.index,
+                        "delta": {
+                            "content": token,
+                        },
+                        "finish_reason": "",
+                    }
+                    # await asyncio.sleep(1)
+                    print('callback pid :',mp.current_process().pid)
+                    # await self.websocket.send(json.dumps(json_return))
+                    await web.send(json.dumps(json_return))
+                    self.index += 1
+                elif isinstance(token, LLMResult):
+                    json_return = {
+                        "chatId": self.json_client["data"]["chatId"],
+                        "questionId": self.json_client["data"]["questionId"],
+                        "created": time.time(),
+                        "code": 0,
+                        "msg": "",
+                        "index": None,
+                        "delta": {
+                            "content": "",
+                        },
+                        "finish_reason": "natural",
+                    }
+                    # await asyncio.sleep(1)
+                    await self.websocket.send(json.dumps(json_return))
+                else:
+                    json_return = {
+                        "chatId": self.json_client["data"]["chatId"],
+                        "questionId": self.json_client["data"]["questionId"],
+                        "created": time.time(),
+                        "code": 1,
+                        "msg": "error when llm running",
+                        "index": None,
+                        "delta": {
+                            "content": "",
+                        },
+                        "finish_reason": "",
+                    }
+                    # await asyncio.sleep(1)
+                    await self.websocket.send(json.dumps(json_return))
+            except Exception as e:
+                json_return = {
+                    "chatId": self.json_client["data"]["chatId"],
+                    "questionId": self.json_client["data"]["questionId"],
+                    "created": time.time(),
+                    "code": 1,
+                    "msg": f"{e}",
+                    "index": None,
+                    "delta": {
+                        "content": "",
+                    },
+                    "finish_reason": "",
+                }
+                await self.websocket.send(json.dumps(json_return))
+
         load_dotenv("azure.env", override=True)
-
-        # %%
-        base_system_message = "You are a helpful assistant."
-
-        self.system_message = f"{base_system_message.strip()}"
-
-        load_dotenv("azure.env", override=True)
-        self.chatgpt_model_name = "gpt-35-turbo"
-
+        # self.chatgpt_model_name = "gpt-35-turbo"
         openai.api_key = os.environ["OPENAI_API_KEY"]
         openai.api_base = os.environ["OPENAI_API_BASE"]
         openai.api_type = os.environ["OPENAI_API_TYPE"]
         openai.api_version = os.environ["OPENAI_API_VERSION"]
-
-    def response(self, user_message):
-        # This is the first user message that will be sent to the model. Feel free to update this.
-
-        # Create the list of messages. role can be either "user" or "assistant"
-        messages = [
-            {"role": "system", "content": self.system_message},
-            {"role": "user", "name": "example_user", "content": user_message},
-        ]
-
-        # %%
-        # Example of an OpenAI ChatCompletion request with stream=True
-        # https://platform.openai.com/docs/guides/chat
-
-        # record the time before the request is sent
-        # start_time = time.time()
-
-        # send a ChatCompletion request to count to 100
-        # response = openai.ChatCompletion.create(
-        #     model='gpt-3.5-turbo',
-        #     messages=[
-        #         {'role': 'user', 'content': 'Count to 100, with a comma between each number and no newlines. E.g., 1, 2, 3, ...'}
-        #     ],
-        #     temperature=0,
-        #     stream=True  # again, we set stream=True
-        # )
-
-        response = openai.ChatCompletion.create(
-            engine=self.chatgpt_model_name,
-            messages=messages,
-            # temperature=0.5,
-            # max_tokens=500,
-            # top_p=0.9,
-            # frequency_penalty=0,
-            # presence_penalty=0,
-            # stream=True,
-            # messages=messages,
-            temperature=0,
-            stream=True,
+        # myhandler = MyCustomSyncHandler(token_cb)
+        myhandler = MyCustomAsyncHandler(token_cb)
+        self.llm = AzureOpenAI(
+            deployment_name="gpt-35-turbo",
+            model_name="text-davinci-002",
+            streaming=True,
+            callbacks=[myhandler],
         )
-        # create variables to collect the stream of chunks
-        # collected_chunks = []
-        collected_messages = []
-        # iterate through the stream of events
-        for chunk in response:
-            # chunk_time = (
-            #     time.time() - start_time
-            # )  # calculate the time delay of the chunk
-            # collected_chunks.append(chunk)  # save the event response
-            chunk_message = chunk["choices"][0]["delta"]  # extract the message\
-            print(chunk_message.get("content", ""))
-            # yield chunk_message.get("content", "")
-            collected_messages.append(chunk_message)  # save the message
-            # print(
-            #     f"Message received : {chunk_message}",
-            #     flush=True,
-            # )  # print the delay and text
 
-        # print the time delay and text received
-        # print(f"Full response received {chunk_time:.2f} seconds after request")
-        full_reply_content = "".join([m.get("content", "") for m in collected_messages])
-        # print(f"Full conversation received: {full_reply_content}")
-        return full_reply_content
+    async def response(self, data_client):
+        try:
+            self.json_client = json.loads(data_client)
+            user_message = self.json_client["data"]["content"][0]
+            await self.llm.apredict(user_message)
+        except json.decoder.JSONDecodeError as json_error:
+            json_return = {
+                "chatId": -1,
+                "questionId": -1,
+                "created": time.time(),
+                "code": 1,
+                "msg": f"{json_error}",
+                "index": None,
+                "delta": {
+                    "content": "",
+                },
+                "finish_reason": "",
+            }
+            await self.websocket.send(json.dumps(json_return))
+        except Exception as e:
+            json_return = {
+                "chatId": self.json_client["data"]["chatId"],
+                "questionId": self.json_client["data"]["questionId"],
+                "created": time.time(),
+                "code": 1,
+                "msg": f"{e}",
+                "index": None,
+                "delta": {
+                    "content": "",
+                },
+                "finish_reason": "",
+            }
+            await self.websocket.send(json.dumps(json_return))
 
 
-def init_gpt_model():
+def init_gpt_model(websocket):
     global llmmodel
-    llmmodel = LLMModel()
+    llmmodel = LLMModel(websocket)
 
 
 class MyHandler(BaseHandler):
@@ -106,53 +184,47 @@ class MyHandler(BaseHandler):
 
         self.cnt = 0
 
-        init_gpt_model()
-        # executor = ProcessPoolExecutor(
-        #     max_workers=1, initializer=init_gpt_model, initargs=()
-        # )
-        # self.executor = executor
         super().__init__(addr, port)
 
-    async def _handle_msg(self, websocket, data_client):
+    async def _handle_msg(self, data_client):
         pool = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context())
-        # pool = ProcessPoolExecutor(max_workers=1)
-        print(json.loads(data_client))
+        # print(json.loads(data_client))
         try:
-            self.cnt += 1
             loop = asyncio.get_event_loop()
-            # async for data in await loop.run_in_executor(
-            #     pool, self._process_data, data_client
-            # ):
-            #     await websocket.send(data)
-            # data = await loop.run_in_executor(pool, self._process_data, data_client)
-            # data=await future
-            future = loop.run_in_executor(pool, self._process_data, data_client)
-            data = await future
-            # print((data))
-            await websocket.send(data)
+            # TODO: ????
+            # await must be added
+            # to get llm inference stopped correctly
+            await loop.run_in_executor(pool, self.process_wrapper, data_client)
+            # loop.run_forever()
         except asyncio.CancelledError as e:
-            print(self.cnt)
+            print("cancel received")
             for _, process in pool._processes.items():
+                print(f"terminating process{process.pid}")
                 process.terminate()
-                self.cnt -= 1
-            print(self.cnt)
             pool.shutdown(wait=False, cancel_futures=True)
+            print("cancel finished")
 
         except Exception as e:
             print(e)
 
     # @staticmethod
     async def _handle(self, websocket):
+        # !!!!
+        init_gpt_model(websocket)
+        global web
+        web=websocket
         loop = asyncio.get_event_loop()
-        task = None
-        # tasks:list[asyncio.Task]=list()
-        # task=asyncio.create_task()
+        tasks: list[asyncio.Task] = list()
+        # print('1')
         async for message in websocket:
             json_client = json.loads(message)
             action = json_client["data"]["action"]
             if action == "stop":
-                if task != None:
+                print("stop received")
+                for task in tasks:
+                    # await asyncio.sleep(1)
                     task.cancel()
+                tasks.clear()
                 json_return = {
                     "chatId": json_client["data"]["chatId"],
                     "questionId": json_client["data"]["questionId"],
@@ -165,62 +237,21 @@ class MyHandler(BaseHandler):
                     },
                     "finish_reason": "provided",
                 }
-
+                signal = json.dumps(json_return)
+                print('handle pid :',mp.current_process().pid)
                 await websocket.send(json.dumps(json_return))
             else:
-                task = loop.create_task(coro=self._handle_msg(websocket, message))
+                task_msg = loop.create_task(coro=self._handle_msg(message))
+                tasks.append(task_msg)
 
     @staticmethod
-    def _process_data(data_client):
-        try:
-            # 解json
+    def process_wrapper(data_client):
+        async def _process_data(data_client):
+            await llmmodel.response(data_client)
 
-            json_recv = json.loads(data_client)
-            json_data = json_recv["data"]
-            # action = json_data["action"]
-            chatId = json_data["chatId"]
-            questionId = json_data["questionId"]
-            content = json_data["content"][-1]
-            print(content)
-
-            index = 0
-            # for value in llmmodel.response(content):
-            value = llmmodel.response(content)
-            # print(value)
-            # print("process pid :", mp.current_process().pid)
-            json_return = {
-                "chatId": chatId,
-                "questionId": questionId,
-                "created": time.time(),
-                "code": 0,
-                "msg": "",
-                "index": index,
-                "delta": {
-                    "content": value,
-                },
-                "finish_reason": "",
-            }
-            index += 1
-            # print(json_return)
-            # yield json.dumps(json_return)
-            return json.dumps(json_return)
-        except Exception as exception:
-            json_return = {
-                "chatId": chatId,
-                "questionId": questionId,
-                "created": time.time(),
-                "code": 1,
-                "msg": f"{exception}",
-                "index": None,
-                "delta": {
-                    "content": "",
-                },
-                "finish_reason": "",
-            }
-            # yield json.dumps(json_return)
-            return json.dumps(json_return)
+        asyncio.run(_process_data(data_client))
 
 
 if __name__ == "__main__":
-    server = MyHandler("localhost", 9098)
+    server = MyHandler("localhost", 7777)
     asyncio.run(server.arun())
