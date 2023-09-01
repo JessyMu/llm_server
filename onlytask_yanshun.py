@@ -70,6 +70,9 @@ async def _handle(websocket):
                 "delta": {
                     "content": "hello",
                 },
+
+
+                
                 "tag": "stop",
                 "finish_reason": "",
             }
